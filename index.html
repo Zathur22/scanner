@@ -29,8 +29,8 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 
 /* Scanning reticle */
 .reticle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
-.ret-inner{width:72%;max-width:280px;aspect-ratio:16/5;position:relative}
-.ret-inner::before,.ret-inner::after,.rc-br,.rc-bl{content:'';position:absolute;width:20px;height:20px;border-color:var(--gold);border-style:solid}
+.ret-inner{width:92%;max-width:450px;aspect-ratio:16/6;position:relative}
+.ret-inner::before,.ret-inner::after,.rc-br,.rc-bl{content:'';position:absolute;width:26px;height:26px;border-color:var(--gold);border-style:solid}
 .ret-inner::before{top:0;left:0;border-width:2px 0 0 2px}
 .ret-inner::after {top:0;right:0;border-width:2px 2px 0 0}
 .rc-br{bottom:0;right:0;border-width:0 2px 2px 0}
@@ -308,7 +308,7 @@ function captureAndDecode() {
   } else {
     scanning = false;
     failCount++;
-    if(failCount > 5) setStatus('scanning','Hold the full V2 waveform inside the frame');
+    if(failCount > 5) setStatus('scanning','Move back slightly and fit the full waveform inside the large frame');
   }
 }
 
@@ -526,10 +526,10 @@ function decodeGeneratedCardImage(ctx, W, H) {
 // Camera photo / live video decoder
 function decodeIdFromImage(ctx, W, H) {
   try {
-    const cropW = Math.floor(W * 0.72);
+    const cropW = Math.floor(W * 0.92);
     const cropH = Math.min(
-      Math.floor(cropW * 5 / 16),
-      Math.floor(H * 0.42)
+      Math.floor(cropW * 6 / 16),
+      Math.floor(H * 0.58)
     );
 
     const cropX = Math.floor((W - cropW) / 2);
@@ -593,7 +593,7 @@ function decodeIdFromImage(ctx, W, H) {
 
     const detectedWidth = activeR - activeL;
 
-    if (detectedWidth < cropW * 0.45) {
+    if (detectedWidth < cropW * 0.38) {
       return null;
     }
 
