@@ -159,11 +159,9 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 </div>
 
 <canvas id="snap"></canvas>
-<audio id="nativeAudio" playsinline></audio>
+<audio id="nativeAudio" crossorigin="anonymous" playsinline></audio>
 
 <script>
-const APP_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwOmLjOCZ6INp4wU4ufj-vFRq9OS7wSAvLoGNY20CDLv3_IKraMOfOJspEjanLfBHVi/exec";
-
 const BIT_BARS  = [5,15,25,35,45,55,65,75];
 const THRESHOLD = 0.75; 
 
@@ -183,11 +181,25 @@ const scanLine = document.getElementById('scanLine');
 const fallbackInput = document.getElementById('fallbackInput');
 
 // ── Standalone External ID Synchronization ──
-// GitHub Pages cannot use google.script.run. The decoder works with the
-// full ID range, while the JSONP lookup confirms whether the ID exists.
 function loadValidCardIds() {
-  validCardIds = [];
-  return Promise.resolve(validCardIds);
+  return new Promise(resolve => {
+    // UPDATE THIS URL PLACEHOLDER FIRST:
+    const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwhMiQTY38R3v71iGCLXEWkV0pI253CsIqvCq4t1YvULa6XhxA4JYoT6kgeUPb2-IJJ/exec";
+    
+    fetch(WEB_APP_URL)
+      .then(r => r.json())
+      .then(cards => {
+        validCardIds = Array.isArray(cards)
+          ? cards.map(c => Number(c.id)).filter(id => Number.isInteger(id) && id >= 1 && id <= 255)
+          : [];
+        resolve(validCardIds);
+      })
+      .catch((err) => {
+        console.warn("Card lookup connection error, safe-bypassing filter constraints:", err);
+        validCardIds = [];
+        resolve([]);
+      });
+  });
 }
 
 // ── Camera API Integration ──
@@ -402,74 +414,33 @@ function decodeIdFromImage(ctx, W, H) {
 function pixelLum(p, w, x, y) { const i = (y * w + x) * 4; return p[i] * 0.299 + p[i + 1] * 0.587 + p[i + 2] * 0.114; }
 function medianValue(v) { if (!v.length) return 0; const s = [...v].sort((a, b) => a - b), m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; }
 
-// ── External Cross-Origin JSONP Lookup ──
+// ── External Cross-Origin Post Pipeline ──
 function lookupId(id) {
   setStatus('scanning', 'Checking database for ID ' + id + '…');
 
-  const callbackName = 'soundwaveLookup_' + Date.now();
-  const script = document.createElement('script');
-  let finished = false;
+  // UPDATE THIS URL PLACEHOLDER SECOND:
+  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwOmLjOCZ6INp4wU4ufj-vFRq9OS7wSAvLoGNY20CDLv3_IKraMOfOJspEjanLfBHVi/exec";
 
-  function cleanup() {
-    if (finished) return;
-    finished = true;
-
-    try {
-      delete window[callbackName];
-    } catch (e) {
-      window[callbackName] = undefined;
-    }
-
-    if (script.parentNode) {
-      script.parentNode.removeChild(script);
-    }
-  }
-
-  const timeout = setTimeout(function() {
-    cleanup();
-    setStatus('error', 'Network lookup timed out.');
-    scanning = false;
-  }, 15000);
-
-  window[callbackName] = function(result) {
-    clearTimeout(timeout);
-    cleanup();
-
+  fetch(WEB_APP_URL, {
+    method: "POST",
+    mode: "cors",
+    body: JSON.stringify({ id: Number(id) })
+  })
+  .then(res => res.json())
+  .then(result => {
     if (result && result.found === true) {
       setStatus('found', 'Card found — ID ' + result.id);
       showPlayer(result);
-      return;
+    } else {
+      setStatus('error', 'ID ' + id + ' not found inside tracking Sheet.');
+      setTimeout(() => { failCount = 0; lastId = -1; scanning = false; }, 2500);
     }
-
-    const message =
-      result && result.error
-        ? result.error
-        : 'Card not found in database (ID:' + id + ')';
-
-    setStatus('error', message);
-
-    setTimeout(function() {
-      failCount = 0;
-      lastId = -1;
-      scanning = false;
-    }, 2500);
-  };
-
-  script.onerror = function() {
-    clearTimeout(timeout);
-    cleanup();
-    setStatus('error', 'Network lookup failed.');
-    scanning = false;
-  };
-
-  script.src =
-    APP_WEB_APP_URL +
-    '?page=lookup' +
-    '&id=' + encodeURIComponent(Number(id)) +
-    '&callback=' + encodeURIComponent(callbackName) +
-    '&t=' + Date.now();
-
-  document.body.appendChild(script);
+  })
+  .catch(err => {
+    console.error("API Pipeline Error:", err);
+    setStatus('error', 'Network lookup error. Is deployment set to Anyone?');
+    setTimeout(() => { scanning = false; }, 2500);
+  });
 }
 
 // ── Player Controls ──
@@ -496,8 +467,14 @@ function showPlayer(card) {
   audioEl.addEventListener('ended', handleEnded);
   audioEl.addEventListener('error', handleAudioStreamError);
 
-  document.getElementById('playBtn').textContent = '▶';
-  document.getElementById('pDebug').textContent = 'Tap play to hear the recording.';
+  audioEl.play()
+    .then(() => {
+      document.getElementById('playBtn').textContent = '⏸';
+      document.getElementById('pDebug').textContent = "";
+    })
+    .catch(() => {
+      document.getElementById('playBtn').textContent = '▶';
+    });
 }
 
 function handleAudioStreamError() {
