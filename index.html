@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Scan Soundwave Card</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0e0e0e;--surface:#161616;--border:#272727;
+  --text:#f0ece6;--muted:#555;--gold:#c9a84c;--gold-dim:rgba(201,168,76,0.08);
+  --green:#4caf7d;--red:#e05555;
+}
+body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:0}
+
+/* Header */
+.hdr{width:100%;padding:18px 20px 14px;border-bottom:1px solid var(--border);text-align:center;background:var(--surface)}
+.hdr-label{font-size:9px;letter-spacing:4px;color:var(--gold);text-transform:uppercase;margin-bottom:3px}
+.hdr-title{font-size:19px;font-weight:normal;font-family:Georgia,serif}
+
+/* Scanner */
+.scanner-section{width:100%;max-width:520px;padding:20px 16px}
+
+.cam-wrap{
+  position:relative;background:#000;border-radius:4px;overflow:hidden;
+  aspect-ratio:4/3;width:100%;margin-bottom:16px;border:1px solid var(--border)
+}
+#video{width:100%;height:100%;object-fit:cover;display:block}
+
+/* Scanning reticle */
+.reticle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+.ret-inner{width:72%;max-width:280px;aspect-ratio:16/5;position:relative}
+.ret-inner::before,.ret-inner::after,.rc-br,.rc-bl{content:'';position:absolute;width:20px;height:20px;border-color:var(--gold);border-style:solid}
+.ret-inner::before{top:0;left:0;border-width:2px 0 0 2px}
+.ret-inner::after {top:0;right:0;border-width:2px 2px 0 0}
+.rc-br{bottom:0;right:0;border-width:0 2px 2px 0}
+.rc-bl{bottom:0;left:0;border-width:0 0 2px 2px}
+
+/* scan line */
+.scan-line{
+  position:absolute;left:4px;right:4px;height:1.5px;
+  background:linear-gradient(90deg,transparent,var(--gold) 30%,var(--gold) 70%,transparent);
+  animation:sl 1.8s ease-in-out infinite;top:0
+}
+@keyframes sl{
+  0%  {top:4px;opacity:0}
+  10% {opacity:1}
+  90% {opacity:1}
+  100%{top:calc(100% - 4px);opacity:0}
+}
+
+/* Status */
+#status{
+  text-align:center;font-size:11px;letter-spacing:2px;text-transform:uppercase;
+  color:var(--muted);margin-bottom:14px;min-height:18px;transition:color .3s
+}
+#status.scanning{color:var(--gold)}
+#status.found   {color:var(--green)}
+#status.error   {color:var(--red)}
+
+.hint-guide{
+  background:var(--surface);border:1px solid var(--border);border-radius:3px;
+  padding:14px 16px;font-size:10px;color:var(--muted);letter-spacing:.5px;line-height:2;
+  margin-bottom:16px
+}
+.hint-guide b{color:var(--text)}
+
+/* Start button */
+#startBtn{
+  width:100%;padding:14px;background:var(--gold);color:#000;border:none;
+  font-family:'Courier New',monospace;font-size:12px;letter-spacing:3px;
+  text-transform:uppercase;border-radius:3px;cursor:pointer;margin-bottom:8px;transition: background 0.3s;
+}
+#startBtn:hover{opacity:.85}
+
+/* ── PLAYER ── */
+#player{display:none;width:100%;max-width:520px;padding:0 16px 32px}
+
+.player-card{background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:28px 24px;text-align:center}
+
+.p-wave{width:100%;height:64px;display:block;margin-bottom:22px;border-radius:2px}
+
+.p-name{font-family:Georgia,serif;font-size:20px;font-weight:normal;color:var(--text);margin-bottom:4px}
+.p-sub{font-size:9px;letter-spacing:3px;text-transform:uppercase;color:var(--muted);margin-bottom:14px}
+
+/* Diagnostic Window */
+.p-debug{font-size:11px;color:#e05555;margin-bottom:20px;min-height:14px;letter-spacing:0.5px;}
+
+.play-btn{
+  width:60px;height:60px;border-radius:50%;background:var(--gold);border:none;
+  cursor:pointer;font-size:22px;display:inline-flex;align-items:center;justify-content:center;
+  margin-bottom:20px;transition:transform .1s;color:#000
+}
+.play-btn:hover{transform:scale(1.06)}
+
+.prog-wrap{width:100%;height:4px;background:var(--border);border-radius:2px;margin-bottom:8px;cursor:pointer;position:relative}
+.prog-fill{height:100%;background:var(--gold);border-radius:2px;width:0%;transition:width .1s linear}
+.time-row{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-bottom:20px}
+
+#scanAgain{
+  padding:10px 24px;background:transparent;border:1px solid var(--border);color:var(--text);
+  font-family:'Courier New',monospace;font-size:10px;letter-spacing:2px;text-transform:uppercase;
+  border-radius:2px;cursor:pointer
+}
+#scanAgain:hover{border-color:var(--gold);color:var(--gold)}
+
+/* hidden canvas */
+#snap{display:none}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div class="hdr-label">Soundwave</div>
+  <div class="hdr-title">Card Scanner</div>
+</div>
+
+<div class="scanner-section" id="scanUI">
+
+  <div class="hint-guide">
+    <b>How to scan:</b><br>
+    Hold your waveform card flat in good light.<br>
+    Keep steady — it reads automatically (or tap to snap a photo if blocked).
+  </div>
+
+  <div id="status">Ready</div>
+
+  <div class="cam-wrap">
+    <video id="video" autoplay muted playsinline webkit-playsinline></video>
+    <div class="reticle">
+      <div class="ret-inner">
+        <div class="rc-br"></div>
+        <div class="rc-bl"></div>
+        <div class="scan-line" id="scanLine"></div>
+      </div>
+    </div>
+  </div>
+
+  <button id="startBtn" onclick="startCamera()">Start Camera</button>
+  
+  <input type="file" id="fallbackInput" accept="image/*" capture="environment" style="display:none" onchange="processFallbackImage(event)">
+
+  <div style="font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px; margin-top:10px;">Works best in bright, even light</div>
+</div>
+
+<div id="player">
+  <div class="player-card">
+    <canvas class="p-wave" id="pWave"></canvas>
+    <div class="p-name" id="pName">—</div>
+    <div class="p-sub">Soundwave Card</div>
+    <div class="p-debug" id="pDebug"></div>
+    <button class="play-btn" id="playBtn" onclick="togglePlay()">▶</button>
+    <div class="prog-wrap" id="progWrap" onclick="seek(event)">
+      <div class="prog-fill" id="progFill"></div>
+    </div>
+    <div class="time-row"><span id="tCur">0:00</span><span id="tDur">0:00</span></div>
+    <button id="scanAgain" onclick="resetScanner()">Scan Another Card</button>
+  </div>
+</div>
+
+<canvas id="snap"></canvas>
+<audio id="nativeAudio" crossorigin="anonymous" playsinline></audio>
+
+<script>
+const BIT_BARS  = [5,15,25,35,45,55,65,75];
+const THRESHOLD = 0.75; 
+
+let stream     = null;
+let scanTimer  = null;
+let audioEl    = null;
+let scanning   = false;
+let lastId     = -1;
+let failCount  = 0;
+let validCardIds = [];
+
+const video   = document.getElementById('video');
+const snap    = document.getElementById('snap');
+const status  = document.getElementById('status');
+const startBtn = document.getElementById('startBtn');
+const scanLine = document.getElementById('scanLine');
+const fallbackInput = document.getElementById('fallbackInput');
+
+// ── Standalone External ID Synchronization ──
+function loadValidCardIds() {
+  return new Promise(resolve => {
+    // UPDATE THIS URL PLACEHOLDER FIRST:
+    const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwhMiQTY38R3v71iGCLXEWkV0pI253CsIqvCq4t1YvULa6XhxA4JYoT6kgeUPb2-IJJ/exec";
+    
+    fetch(WEB_APP_URL)
+      .then(r => r.json())
+      .then(cards => {
+        validCardIds = Array.isArray(cards)
+          ? cards.map(c => Number(c.id)).filter(id => Number.isInteger(id) && id >= 1 && id <= 255)
+          : [];
+        resolve(validCardIds);
+      })
+      .catch((err) => {
+        console.warn("Card lookup connection error, safe-bypassing filter constraints:", err);
+        validCardIds = [];
+        resolve([]);
+      });
+  });
+}
+
+// ── Camera API Integration ──
+async function startCamera() {
+  setStatus('scanning', 'Initializing sync pipeline...');
+  await loadValidCardIds();
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    enableFallback('Browser blocking hardware APIs. Using Photo Mode.');
+    return;
+  }
+
+  try {
+    setStatus('scanning', 'Requesting system permission…');
+    const constraints = {
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    };
+
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = stream;
+    await video.play();
+    
+    setStatus('scanning', 'Scanning…');
+    if (scanTimer) clearInterval(scanTimer);
+    scanTimer = setInterval(captureAndDecode, 600);
+
+  } catch(e) {
+    console.error("Camera block:", e);
+    enableFallback('Live camera blocked by browser. Switched to Photo Mode.');
+  }
+}
+
+function enableFallback(msg) {
+  setStatus('error', msg);
+  startBtn.textContent = "📷 Tap to Snap Photo";
+  startBtn.style.background = "var(--text)"; 
+  startBtn.onclick = () => fallbackInput.click();
+  scanLine.style.display = 'none';
+}
+
+async function processFallbackImage(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  
+  setStatus('scanning', 'Analyzing image...');
+  const img = new Image();
+  const url = URL.createObjectURL(file);
+  
+  img.onload = () => {
+    URL.revokeObjectURL(url); 
+    snap.width = img.width;
+    snap.height = img.height;
+    const ctx = snap.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    
+    let id = decodeGeneratedCardImage(ctx, snap.width, snap.height);
+    if (id === null) id = decodeIdFromImage(ctx, snap.width, snap.height);
+    
+    if(id !== null) {
+      lastId = id;
+      setStatus('found', 'Card detected — looking up…');
+      lookupId(id);
+    } else {
+      setStatus('error', 'Could not read waveform. Make sure it is flat and well-lit. Try another photo.');
+    }
+  };
+  img.src = url;
+}
+
+function stopCamera() {
+  if(scanTimer) { clearInterval(scanTimer); scanTimer=null; }
+  if(stream){ stream.getTracks().forEach(t => t.stop()); stream=null; }
+}
+
+function captureAndDecode() {
+  if(!video.videoWidth || scanning) return;
+  scanning = true;
+
+  snap.width  = video.videoWidth;
+  snap.height = video.videoHeight;
+  const ctx = snap.getContext('2d');
+  ctx.drawImage(video, 0, 0);
+
+  const id = decodeIdFromImage(ctx, snap.width, snap.height);
+
+  if(id !== null && id !== lastId) {
+    lastId = id;
+    setStatus('found','Card detected — looking up…');
+    stopCamera();
+    lookupId(id);
+  } else {
+    scanning = false;
+    failCount++;
+    if(failCount > 5) setStatus('scanning','Hold card flat — waveform bars in frame');
+  }
+}
+
+// ── Waveform Decoding Core Math Modules ──
+function decodeGeneratedCardImage(ctx, W, H) {
+  try {
+    const ratio = W / H;
+    if (Math.abs(ratio - (1050 / 600)) > 0.12) return null;
+
+    const scaleX = W / 1050, scaleY = H / 600;
+    const waveX = 50 * scaleX, waveY = 90 * scaleY, waveW = 950 * scaleX, waveH = 390 * scaleY;
+    const barStep = waveW / 100;
+
+    const sample = ctx.getImageData(0, 0, W, H);
+    const pixels = sample.data;
+
+    const bgValues = [pixelLum(pixels, W, 5, 5), pixelLum(pixels, W, W - 6, 5), pixelLum(pixels, W, 5, H - 6), pixelLum(pixels, W, W - 6, H - 6)];
+    const bg = medianValue(bgValues), darkBackground = bg < 128, threshold = 24, heights = [];
+
+    for (let b = 0; b < BIT_BARS.length; b++) {
+      const barIndex = BIT_BARS[b];
+      const centreX = Math.round(waveX + (barIndex + 0.28) * barStep);
+      const columnHeights = [];
+
+      [-0.18, 0, 0.18].forEach(offset => {
+        const x = Math.max(0, Math.min(W - 1, Math.round(centreX + offset * barStep)));
+        let top = -1, bottom = -1;
+        const startY = Math.max(0, Math.floor(waveY)), endY = Math.min(H - 1, Math.ceil(waveY + waveH));
+
+        for (let y = startY; y <= endY; y++) {
+          const lum = pixelLum(pixels, W, x, y);
+          const active = darkBackground ? lum > bg + threshold : lum < bg - threshold;
+          if (active) { if (top < 0) top = y; bottom = y; }
+        }
+        columnHeights.push(top < 0 ? 0 : bottom - top + 1);
+      });
+      heights.push(medianValue(columnHeights));
+    }
+
+    if (heights.every(h => h <= 1)) return null;
+    const maxHeight = Math.max(...heights);
+    if (maxHeight <= 0) return null;
+
+    return matchMeasuredHeightsToValidId(heights.map(h => h / maxHeight));
+  } catch (e) { return null; }
+}
+
+function matchMeasuredHeightsToValidId(normalized) {
+  const candidates = validCardIds.length ? validCardIds : Array.from({ length: 255 }, (_, i) => i + 1);
+  let bestId = null, bestError = Infinity;
+
+  candidates.forEach(candidateId => {
+    let totalError = 0;
+    for (let b = 0; b < 8; b++) {
+      const bit = (candidateId >> (7 - b)) & 1;
+      totalError += Math.abs(normalized[b] - (bit ? 1.0 : 0.55));
+    }
+    const averageError = totalError / 8;
+    if (averageError < bestError) { bestError = averageError; bestId = candidateId; }
+  });
+  return bestId !== null && bestError <= 0.30 ? bestId : null;
+}
+
+function decodeIdFromImage(ctx, W, H) {
+  try {
+    const cropW = Math.floor(W * 0.72), cropH = Math.min(Math.floor(cropW * 5 / 16), Math.floor(H * 0.42));
+    const cropX = Math.floor((W - cropW) / 2), cropY = Math.floor((H - cropH) / 2);
+
+    const imgData = ctx.getImageData(cropX, cropY, cropW, cropH), pixels = imgData.data, edgeValues = [];
+
+    for (let x = 0; x < cropW; x += 4) { edgeValues.push(pixelLum(pixels, cropW, x, 2)); edgeValues.push(pixelLum(pixels, cropW, x, cropH - 3)); }
+    for (let y = 0; y < cropH; y += 4) { edgeValues.push(pixelLum(pixels, cropW, 2, y)); edgeValues.push(pixelLum(pixels, cropW, cropW - 3, y)); }
+
+    const bgSample = medianValue(edgeValues), isBgDark = bgSample < 128;
+    const pixelThreshold = Math.max(22, medianValue(edgeValues.map(v => Math.abs(v - bgSample))) * 2.5);
+    const yStart = Math.floor(cropH * 0.10), yEnd = Math.floor(cropH * 0.90);
+
+    let activeL = -1, activeR = -1;
+    for (let x = 0; x < cropW; x++) {
+      let activeCount = 0;
+      for (let y = yStart; y < yEnd; y += 2) {
+        const lum = pixelLum(pixels, cropW, x, y);
+        if (isBgDark ? lum > bgSample + pixelThreshold : lum < bgSample - pixelThreshold) activeCount++;
+      }
+      if (activeCount >= 3) { if (activeL < 0) activeL = x; activeR = x; }
+    }
+
+    if (activeL < 0) return null;
+    const originalWaveW = activeR - activeL;
+    if (originalWaveW < cropW * 0.45) return null;
+
+    activeL += Math.floor(originalWaveW * 0.02); activeR -= Math.floor(originalWaveW * 0.02);
+    const waveW = activeR - activeL, barStep = waveW / 100, barHeights = [];
+
+    for (let b = 0; b < 8; b++) {
+      const barIndex = BIT_BARS[b], centreX = activeL + (barIndex + 0.28) * barStep, samples = [];
+      [-0.16, 0, 0.16].forEach(offset => {
+        const x = Math.max(0, Math.min(cropW - 1, Math.round(centreX + offset * barStep)));
+        let topPx = -1, botPx = -1;
+        for (let y = yStart; y < yEnd; y++) {
+          const lum = pixelLum(pixels, cropW, x, y);
+          if (isBgDark ? lum > bgSample + pixelThreshold : lum < bgSample - pixelThreshold) { if (topPx < 0) topPx = y; botPx = y; }
+        }
+        samples.push(topPx < 0 ? 0 : botPx - topPx + 1);
+      });
+      barHeights.push(medianValue(samples));
+    }
+
+    if (barHeights.every(h => h <= 1)) return null;
+    const maxH = Math.max(...barHeights);
+    if (maxH <= 0) return null;
+
+    return matchMeasuredHeightsToValidId(barHeights.map(h => h / maxH));
+  } catch(e) { return null; }
+}
+
+function pixelLum(p, w, x, y) { const i = (y * w + x) * 4; return p[i] * 0.299 + p[i + 1] * 0.587 + p[i + 2] * 0.114; }
+function medianValue(v) { if (!v.length) return 0; const s = [...v].sort((a, b) => a - b), m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; }
+
+// ── External Cross-Origin Post Pipeline ──
+function lookupId(id) {
+  setStatus('scanning', 'Checking database for ID ' + id + '…');
+
+  // UPDATE THIS URL PLACEHOLDER SECOND:
+  const WEB_APP_URL = "https://script.google.com/macros/s/YOUR_REAL_DEPLOYMENT_ID/exec";
+
+  fetch(WEB_APP_URL, {
+    method: "POST",
+    mode: "cors",
+    body: JSON.stringify({ id: Number(id) })
+  })
+  .then(res => res.json())
+  .then(result => {
+    if (result && result.found === true) {
+      setStatus('found', 'Card found — ID ' + result.id);
+      showPlayer(result);
+    } else {
+      setStatus('error', 'ID ' + id + ' not found inside tracking Sheet.');
+      setTimeout(() => { failCount = 0; lastId = -1; scanning = false; }, 2500);
+    }
+  })
+  .catch(err => {
+    console.error("API Pipeline Error:", err);
+    setStatus('error', 'Network lookup error. Is deployment set to Anyone?');
+    setTimeout(() => { scanning = false; }, 2500);
+  });
+}
+
+// ── Player Controls ──
+function showPlayer(card) {
+  document.getElementById('scanUI').style.display='none';
+  document.getElementById('player').style.display='block';
+  document.getElementById('pName').textContent = card.name || 'Audio';
+  document.getElementById('pDebug').textContent = "Loading file bits...";
+
+  drawPlayerWave();
+
+  audioEl = document.getElementById('nativeAudio');
+  audioEl.pause();
+  audioEl.src = card.audioUrl;
+  audioEl.load();
+
+  audioEl.removeEventListener('loadedmetadata', handleMetadata);
+  audioEl.removeEventListener('timeupdate', updateProg);
+  audioEl.removeEventListener('ended', handleEnded);
+  audioEl.removeEventListener('error', handleAudioStreamError);
+
+  audioEl.addEventListener('loadedmetadata', handleMetadata);
+  audioEl.addEventListener('timeupdate', updateProg);
+  audioEl.addEventListener('ended', handleEnded);
+  audioEl.addEventListener('error', handleAudioStreamError);
+
+  audioEl.play()
+    .then(() => {
+      document.getElementById('playBtn').textContent = '⏸';
+      document.getElementById('pDebug').textContent = "";
+    })
+    .catch(() => {
+      document.getElementById('playBtn').textContent = '▶';
+    });
+}
+
+function handleAudioStreamError() {
+  const e = audioEl ? audioEl.error : null;
+  const d = document.getElementById('pDebug');
+  if (!e) { d.textContent = "Status: Connection dropped."; return; }
+  switch (e.code) {
+    case 1: d.textContent = "Error: Stream aborted."; break;
+    case 2: d.textContent = "Error: File route not found."; break;
+    case 3: d.textContent = "Error: Decode crash. Check if url is a webpage."; break;
+    case 4: d.textContent = "Error: Format unsupported or host blocked connection."; break;
+    default: d.textContent = "Playback blocked. Verify link address.";
+  }
+}
+
+function handleMetadata() { document.getElementById('tDur').textContent = fmt(audioEl.duration); document.getElementById('pDebug').textContent = ""; }
+function handleEnded() { document.getElementById('playBtn').textContent = '▶'; audioEl.currentTime = 0; }
+
+function drawPlayerWave() {
+  const c = document.getElementById('pWave'), W = c.offsetWidth*2||600, H=128;
+  c.width=W; c.height=H; const ctx=c.getContext('2d');
+  ctx.fillStyle='#0e0e0e'; ctx.fillRect(0,0,W,H);
+  const N=80, gp=W/N, bw=gp*0.5;
+  for(let i=0;i<N;i++){
+    const h=Math.max(3,(0.25+0.75*Math.abs(Math.sin(i*0.38)*Math.cos(i*0.11+0.5)))*H*0.84);
+    ctx.fillStyle='#c9a84c'; ctx.fillRect(i*gp,(H-h)/2,bw,h);
+  }
+}
+
+function togglePlay(){
+  if(!audioEl) return;
+  const btn = document.getElementById('playBtn');
+  if (btn.textContent === '▶') {
+    btn.textContent = '⏸';
+    audioEl.play().catch(e => { btn.textContent = '▶'; handleAudioStreamError(); });
+  } else {
+    btn.textContent = '▶'; audioEl.pause();
+  }
+}
+
+function updateProg(){
+  if(!audioEl||!audioEl.duration)return;
+  document.getElementById('progFill').style.width=(audioEl.currentTime/audioEl.duration*100)+'%';
+  document.getElementById('tCur').textContent=fmt(audioEl.currentTime);
+}
+
+function seek(e){
+  if(!audioEl||!audioEl.duration)return;
+  const r=document.getElementById('progWrap').getBoundingClientRect();
+  audioEl.currentTime=((e.clientX-r.left)/r.width)*audioEl.duration;
+}
+
+function fmt(s){ if(isNaN(s)) return "0:00"; const m=Math.floor(s/60),sec=Math.floor(s%60); return m+':'+(sec<10?'0':'')+sec; }
+
+function resetScanner(){
+  if(audioEl){ audioEl.pause(); }
+  document.getElementById('player').style.display='none';
+  document.getElementById('scanUI').style.display='block';
+  document.getElementById('pDebug').textContent = "";
+  lastId=-1; failCount=0; scanning=false;
+  startBtn.textContent = "Start Camera"; startBtn.style.background = "var(--gold)"; startBtn.onclick = startCamera;
+  scanLine.style.display = 'block'; setStatus('scanning','Scanning…'); startCamera();
+}
+function setStatus(cls,msg){ status.className=cls; status.textContent=msg; }
+</script>
+</body>
+</html>
