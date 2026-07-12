@@ -159,11 +159,39 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 </div>
 
 <canvas id="snap"></canvas>
-<audio id="nativeAudio" crossorigin="anonymous" playsinline></audio>
+<audio id="nativeAudio" playsinline></audio>
 
 <script>
-const BIT_BARS  = [5,15,25,35,45,55,65,75];
-const THRESHOLD = 0.75; 
+const APP_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxpI-hW4R-u8xP52sIyzIU0e1abWEIK-29ohOTBkZsH6Nvh_VqwOo4lGkXRol95byeB/exec";
+
+// ── V2 waveform code — must match creator.html exactly ──
+const ENC_HIGH = 1.00;
+const ENC_LOW  = 0.32;
+const BIT_THRESHOLD = 0.64;
+
+const START_POS = [4,5,6,7,8,9];
+const START_PATTERN = [1,0,1,0,1,1];
+
+const ID1_POS = [14,18,22,26,30,34,38,42];
+
+const SYNC_POS = [47,48,49,50];
+const SYNC_PATTERN = [1,0,0,1];
+
+const ID2_POS = [55,59,63,67,71,75,79,83];
+
+const CHECK_POS = [86,88,90,92];
+
+const END_POS = [94,95,96,97,98,99];
+const END_PATTERN = [1,1,0,1,0,1];
+
+const ALL_V2_POSITIONS = [
+  ...START_POS,
+  ...ID1_POS,
+  ...SYNC_POS,
+  ...ID2_POS,
+  ...CHECK_POS,
+  ...END_POS
+];
 
 let stream     = null;
 let scanTimer  = null;
@@ -181,25 +209,11 @@ const scanLine = document.getElementById('scanLine');
 const fallbackInput = document.getElementById('fallbackInput');
 
 // ── Standalone External ID Synchronization ──
+// GitHub Pages cannot use google.script.run. The decoder works with the
+// full ID range, while the JSONP lookup confirms whether the ID exists.
 function loadValidCardIds() {
-  return new Promise(resolve => {
-    // UPDATE THIS URL PLACEHOLDER FIRST:
-    const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwhMiQTY38R3v71iGCLXEWkV0pI253CsIqvCq4t1YvULa6XhxA4JYoT6kgeUPb2-IJJ/exec";
-    
-    fetch(WEB_APP_URL)
-      .then(r => r.json())
-      .then(cards => {
-        validCardIds = Array.isArray(cards)
-          ? cards.map(c => Number(c.id)).filter(id => Number.isInteger(id) && id >= 1 && id <= 255)
-          : [];
-        resolve(validCardIds);
-      })
-      .catch((err) => {
-        console.warn("Card lookup connection error, safe-bypassing filter constraints:", err);
-        validCardIds = [];
-        resolve([]);
-      });
-  });
+  validCardIds = [];
+  return Promise.resolve(validCardIds);
 }
 
 // ── Camera API Integration ──
@@ -294,153 +308,410 @@ function captureAndDecode() {
   } else {
     scanning = false;
     failCount++;
-    if(failCount > 5) setStatus('scanning','Hold card flat — waveform bars in frame');
+    if(failCount > 5) setStatus('scanning','Hold the full V2 waveform inside the frame');
   }
 }
 
-// ── Waveform Decoding Core Math Modules ──
+// ── V2 Waveform Decoding ──
+// The scanner only accepts a result when:
+// 1. START marker is valid
+// 2. SYNC marker is valid
+// 3. both 8-bit ID copies match
+// 4. the 4-bit checksum is correct
+// 5. END marker is valid
+//
+// This prevents a noisy scan from becoming a random ID such as 223.
+
+function getChecksum4(id) {
+  return ((((id >> 4) & 15) ^ (id & 15)) & 15);
+}
+
+function bitsToNumber(bits) {
+  return bits.reduce((value, bit) => (value << 1) | bit, 0);
+}
+
+function countPatternErrors(bits, expected) {
+  let errors = 0;
+
+  for (let i = 0; i < expected.length; i++) {
+    if (bits[i] !== expected[i]) errors++;
+  }
+
+  return errors;
+}
+
+function decodeV2FromNormalizedHeights(normalizedByPosition) {
+  function readBits(positions) {
+    return positions.map(position =>
+      normalizedByPosition[position] >= BIT_THRESHOLD ? 1 : 0
+    );
+  }
+
+  const startBits = readBits(START_POS);
+  const syncBits  = readBits(SYNC_POS);
+  const endBits   = readBits(END_POS);
+
+  // Allow at most one noisy marker bit in start/end, but sync must be exact.
+  if (countPatternErrors(startBits, START_PATTERN) > 1) return null;
+  if (countPatternErrors(syncBits, SYNC_PATTERN) > 0) return null;
+  if (countPatternErrors(endBits, END_PATTERN) > 1) return null;
+
+  const id1 = bitsToNumber(readBits(ID1_POS));
+  const id2 = bitsToNumber(readBits(ID2_POS));
+  const checksum = bitsToNumber(readBits(CHECK_POS));
+
+  if (id1 !== id2) return null;
+  if (id1 < 1 || id1 > 255) return null;
+  if (checksum !== getChecksum4(id1)) return null;
+
+  // Compare every encoded height to the expected V2 high/low level.
+  // Reject scans that technically pass bits but are visually poor matches.
+  let totalError = 0;
+  let count = 0;
+
+  const groups = [
+    [START_POS, START_PATTERN],
+    [SYNC_POS, SYNC_PATTERN],
+    [END_POS, END_PATTERN]
+  ];
+
+  groups.forEach(([positions, pattern]) => {
+    positions.forEach((position, index) => {
+      const expected = pattern[index] ? ENC_HIGH : ENC_LOW;
+      totalError += Math.abs(normalizedByPosition[position] - expected);
+      count++;
+    });
+  });
+
+  const id1Bits = ID1_POS.map((_, index) => (id1 >> (7 - index)) & 1);
+  const id2Bits = ID2_POS.map((_, index) => (id2 >> (7 - index)) & 1);
+  const checkBits = CHECK_POS.map((_, index) => (checksum >> (3 - index)) & 1);
+
+  [
+    [ID1_POS, id1Bits],
+    [ID2_POS, id2Bits],
+    [CHECK_POS, checkBits]
+  ].forEach(([positions, bits]) => {
+    positions.forEach((position, index) => {
+      const expected = bits[index] ? ENC_HIGH : ENC_LOW;
+      totalError += Math.abs(normalizedByPosition[position] - expected);
+      count++;
+    });
+  });
+
+  const averageError = count ? totalError / count : 1;
+
+  return averageError <= 0.25 ? id1 : null;
+}
+
+function measureEncodedHeights(
+  pixels,
+  imageWidth,
+  imageHeight,
+  waveX,
+  waveY,
+  waveW,
+  waveH,
+  bg,
+  darkBackground,
+  pixelThreshold
+) {
+  const barStep = waveW / 100;
+  const rawHeights = {};
+
+  ALL_V2_POSITIONS.forEach(position => {
+    const centreX = waveX + (position + 0.28) * barStep;
+    const nearbyHeights = [];
+
+    [-0.18, 0, 0.18].forEach(offset => {
+      const x = Math.max(
+        0,
+        Math.min(
+          imageWidth - 1,
+          Math.round(centreX + offset * barStep)
+        )
+      );
+
+      let top = -1;
+      let bottom = -1;
+
+      const startY = Math.max(0, Math.floor(waveY));
+      const endY = Math.min(
+        imageHeight - 1,
+        Math.ceil(waveY + waveH)
+      );
+
+      for (let y = startY; y <= endY; y++) {
+        const lum = pixelLum(pixels, imageWidth, x, y);
+
+        const active = darkBackground
+          ? lum > bg + pixelThreshold
+          : lum < bg - pixelThreshold;
+
+        if (active) {
+          if (top < 0) top = y;
+          bottom = y;
+        }
+      }
+
+      nearbyHeights.push(
+        top < 0 ? 0 : bottom - top + 1
+      );
+    });
+
+    rawHeights[position] = medianValue(nearbyHeights);
+  });
+
+  const maxHeight = Math.max(
+    ...Object.values(rawHeights)
+  );
+
+  if (!maxHeight || maxHeight <= 1) return null;
+
+  const normalized = {};
+
+  Object.keys(rawHeights).forEach(key => {
+    normalized[key] = rawHeights[key] / maxHeight;
+  });
+
+  return normalized;
+}
+
+// Original PNG exported by creator.html (1050 × 600)
 function decodeGeneratedCardImage(ctx, W, H) {
   try {
     const ratio = W / H;
-    if (Math.abs(ratio - (1050 / 600)) > 0.12) return null;
 
-    const scaleX = W / 1050, scaleY = H / 600;
-    const waveX = 50 * scaleX, waveY = 90 * scaleY, waveW = 950 * scaleX, waveH = 390 * scaleY;
-    const barStep = waveW / 100;
-
-    const sample = ctx.getImageData(0, 0, W, H);
-    const pixels = sample.data;
-
-    const bgValues = [pixelLum(pixels, W, 5, 5), pixelLum(pixels, W, W - 6, 5), pixelLum(pixels, W, 5, H - 6), pixelLum(pixels, W, W - 6, H - 6)];
-    const bg = medianValue(bgValues), darkBackground = bg < 128, threshold = 24, heights = [];
-
-    for (let b = 0; b < BIT_BARS.length; b++) {
-      const barIndex = BIT_BARS[b];
-      const centreX = Math.round(waveX + (barIndex + 0.28) * barStep);
-      const columnHeights = [];
-
-      [-0.18, 0, 0.18].forEach(offset => {
-        const x = Math.max(0, Math.min(W - 1, Math.round(centreX + offset * barStep)));
-        let top = -1, bottom = -1;
-        const startY = Math.max(0, Math.floor(waveY)), endY = Math.min(H - 1, Math.ceil(waveY + waveH));
-
-        for (let y = startY; y <= endY; y++) {
-          const lum = pixelLum(pixels, W, x, y);
-          const active = darkBackground ? lum > bg + threshold : lum < bg - threshold;
-          if (active) { if (top < 0) top = y; bottom = y; }
-        }
-        columnHeights.push(top < 0 ? 0 : bottom - top + 1);
-      });
-      heights.push(medianValue(columnHeights));
+    if (Math.abs(ratio - (1050 / 600)) > 0.12) {
+      return null;
     }
 
-    if (heights.every(h => h <= 1)) return null;
-    const maxHeight = Math.max(...heights);
-    if (maxHeight <= 0) return null;
+    const pixels = ctx.getImageData(0, 0, W, H).data;
+    const scaleX = W / 1050;
+    const scaleY = H / 600;
 
-    return matchMeasuredHeightsToValidId(heights.map(h => h / maxHeight));
-  } catch (e) { return null; }
+    const bgValues = [
+      pixelLum(pixels, W, 5, 5),
+      pixelLum(pixels, W, W - 6, 5),
+      pixelLum(pixels, W, 5, H - 6),
+      pixelLum(pixels, W, W - 6, H - 6)
+    ];
+
+    const bg = medianValue(bgValues);
+    const darkBackground = bg < 128;
+
+    const normalized = measureEncodedHeights(
+      pixels,
+      W,
+      H,
+      50 * scaleX,
+      90 * scaleY,
+      950 * scaleX,
+      390 * scaleY,
+      bg,
+      darkBackground,
+      24
+    );
+
+    return normalized
+      ? decodeV2FromNormalizedHeights(normalized)
+      : null;
+
+  } catch (error) {
+    console.error('V2 PNG decode error:', error);
+    return null;
+  }
 }
 
-function matchMeasuredHeightsToValidId(normalized) {
-  const candidates = validCardIds.length ? validCardIds : Array.from({ length: 255 }, (_, i) => i + 1);
-  let bestId = null, bestError = Infinity;
-
-  candidates.forEach(candidateId => {
-    let totalError = 0;
-    for (let b = 0; b < 8; b++) {
-      const bit = (candidateId >> (7 - b)) & 1;
-      totalError += Math.abs(normalized[b] - (bit ? 1.0 : 0.55));
-    }
-    const averageError = totalError / 8;
-    if (averageError < bestError) { bestError = averageError; bestId = candidateId; }
-  });
-  return bestId !== null && bestError <= 0.30 ? bestId : null;
-}
-
+// Camera photo / live video decoder
 function decodeIdFromImage(ctx, W, H) {
   try {
-    const cropW = Math.floor(W * 0.72), cropH = Math.min(Math.floor(cropW * 5 / 16), Math.floor(H * 0.42));
-    const cropX = Math.floor((W - cropW) / 2), cropY = Math.floor((H - cropH) / 2);
+    const cropW = Math.floor(W * 0.72);
+    const cropH = Math.min(
+      Math.floor(cropW * 5 / 16),
+      Math.floor(H * 0.42)
+    );
 
-    const imgData = ctx.getImageData(cropX, cropY, cropW, cropH), pixels = imgData.data, edgeValues = [];
+    const cropX = Math.floor((W - cropW) / 2);
+    const cropY = Math.floor((H - cropH) / 2);
 
-    for (let x = 0; x < cropW; x += 4) { edgeValues.push(pixelLum(pixels, cropW, x, 2)); edgeValues.push(pixelLum(pixels, cropW, x, cropH - 3)); }
-    for (let y = 0; y < cropH; y += 4) { edgeValues.push(pixelLum(pixels, cropW, 2, y)); edgeValues.push(pixelLum(pixels, cropW, cropW - 3, y)); }
+    const imageData = ctx.getImageData(
+      cropX,
+      cropY,
+      cropW,
+      cropH
+    );
 
-    const bgSample = medianValue(edgeValues), isBgDark = bgSample < 128;
-    const pixelThreshold = Math.max(22, medianValue(edgeValues.map(v => Math.abs(v - bgSample))) * 2.5);
-    const yStart = Math.floor(cropH * 0.10), yEnd = Math.floor(cropH * 0.90);
+    const pixels = imageData.data;
+    const edgeValues = [];
 
-    let activeL = -1, activeR = -1;
+    for (let x = 0; x < cropW; x += 4) {
+      edgeValues.push(pixelLum(pixels, cropW, x, 2));
+      edgeValues.push(pixelLum(pixels, cropW, x, cropH - 3));
+    }
+
+    for (let y = 0; y < cropH; y += 4) {
+      edgeValues.push(pixelLum(pixels, cropW, 2, y));
+      edgeValues.push(pixelLum(pixels, cropW, cropW - 3, y));
+    }
+
+    const bg = medianValue(edgeValues);
+    const darkBackground = bg < 128;
+
+    const edgeNoise = medianValue(
+      edgeValues.map(value => Math.abs(value - bg))
+    );
+
+    const threshold = Math.max(22, edgeNoise * 2.5);
+
+    const yStart = Math.floor(cropH * 0.08);
+    const yEnd = Math.floor(cropH * 0.92);
+
+    let activeL = -1;
+    let activeR = -1;
+
     for (let x = 0; x < cropW; x++) {
       let activeCount = 0;
+
       for (let y = yStart; y < yEnd; y += 2) {
         const lum = pixelLum(pixels, cropW, x, y);
-        if (isBgDark ? lum > bgSample + pixelThreshold : lum < bgSample - pixelThreshold) activeCount++;
+
+        const active = darkBackground
+          ? lum > bg + threshold
+          : lum < bg - threshold;
+
+        if (active) activeCount++;
       }
-      if (activeCount >= 3) { if (activeL < 0) activeL = x; activeR = x; }
+
+      if (activeCount >= 3) {
+        if (activeL < 0) activeL = x;
+        activeR = x;
+      }
     }
 
     if (activeL < 0) return null;
-    const originalWaveW = activeR - activeL;
-    if (originalWaveW < cropW * 0.45) return null;
 
-    activeL += Math.floor(originalWaveW * 0.02); activeR -= Math.floor(originalWaveW * 0.02);
-    const waveW = activeR - activeL, barStep = waveW / 100, barHeights = [];
+    const detectedWidth = activeR - activeL;
 
-    for (let b = 0; b < 8; b++) {
-      const barIndex = BIT_BARS[b], centreX = activeL + (barIndex + 0.28) * barStep, samples = [];
-      [-0.16, 0, 0.16].forEach(offset => {
-        const x = Math.max(0, Math.min(cropW - 1, Math.round(centreX + offset * barStep)));
-        let topPx = -1, botPx = -1;
-        for (let y = yStart; y < yEnd; y++) {
-          const lum = pixelLum(pixels, cropW, x, y);
-          if (isBgDark ? lum > bgSample + pixelThreshold : lum < bgSample - pixelThreshold) { if (topPx < 0) topPx = y; botPx = y; }
-        }
-        samples.push(topPx < 0 ? 0 : botPx - topPx + 1);
-      });
-      barHeights.push(medianValue(samples));
+    if (detectedWidth < cropW * 0.45) {
+      return null;
     }
 
-    if (barHeights.every(h => h <= 1)) return null;
-    const maxH = Math.max(...barHeights);
-    if (maxH <= 0) return null;
+    activeL += Math.floor(detectedWidth * 0.02);
+    activeR -= Math.floor(detectedWidth * 0.02);
 
-    return matchMeasuredHeightsToValidId(barHeights.map(h => h / maxH));
-  } catch(e) { return null; }
+    const normalized = measureEncodedHeights(
+      pixels,
+      cropW,
+      cropH,
+      activeL,
+      yStart,
+      activeR - activeL,
+      yEnd - yStart,
+      bg,
+      darkBackground,
+      threshold
+    );
+
+    return normalized
+      ? decodeV2FromNormalizedHeights(normalized)
+      : null;
+
+  } catch (error) {
+    console.error('V2 camera decode error:', error);
+    return null;
+  }
 }
 
-function pixelLum(p, w, x, y) { const i = (y * w + x) * 4; return p[i] * 0.299 + p[i + 1] * 0.587 + p[i + 2] * 0.114; }
-function medianValue(v) { if (!v.length) return 0; const s = [...v].sort((a, b) => a - b), m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; }
+function pixelLum(pixels, width, x, y) {
+  const index = (y * width + x) * 4;
 
-// ── External Cross-Origin Post Pipeline ──
+  return (
+    pixels[index] * 0.299 +
+    pixels[index + 1] * 0.587 +
+    pixels[index + 2] * 0.114
+  );
+}
+
+function medianValue(values) {
+  if (!values.length) return 0;
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+
+  return sorted.length % 2
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+// ── External Cross-Origin JSONP Lookup ──
 function lookupId(id) {
   setStatus('scanning', 'Checking database for ID ' + id + '…');
 
-  // UPDATE THIS URL PLACEHOLDER SECOND:
-  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxpI-hW4R-u8xP52sIyzIU0e1abWEIK-29ohOTBkZsH6Nvh_VqwOo4lGkXRol95byeB/exec";
+  const callbackName = 'soundwaveLookup_' + Date.now();
+  const script = document.createElement('script');
+  let finished = false;
 
-  fetch(WEB_APP_URL, {
-    method: "POST",
-    mode: "cors",
-    body: JSON.stringify({ id: Number(id) })
-  })
-  .then(res => res.json())
-  .then(result => {
+  function cleanup() {
+    if (finished) return;
+    finished = true;
+
+    try {
+      delete window[callbackName];
+    } catch (e) {
+      window[callbackName] = undefined;
+    }
+
+    if (script.parentNode) {
+      script.parentNode.removeChild(script);
+    }
+  }
+
+  const timeout = setTimeout(function() {
+    cleanup();
+    setStatus('error', 'Network lookup timed out.');
+    scanning = false;
+  }, 15000);
+
+  window[callbackName] = function(result) {
+    clearTimeout(timeout);
+    cleanup();
+
     if (result && result.found === true) {
       setStatus('found', 'Card found — ID ' + result.id);
       showPlayer(result);
-    } else {
-      setStatus('error', 'ID ' + id + ' not found inside tracking Sheet.');
-      setTimeout(() => { failCount = 0; lastId = -1; scanning = false; }, 2500);
+      return;
     }
-  })
-  .catch(err => {
-    console.error("API Pipeline Error:", err);
-    setStatus('error', 'Network lookup error. Is deployment set to Anyone?');
-    setTimeout(() => { scanning = false; }, 2500);
-  });
+
+    const message =
+      result && result.error
+        ? result.error
+        : 'Card not found in database (ID:' + id + ')';
+
+    setStatus('error', message);
+
+    setTimeout(function() {
+      failCount = 0;
+      lastId = -1;
+      scanning = false;
+    }, 2500);
+  };
+
+  script.onerror = function() {
+    clearTimeout(timeout);
+    cleanup();
+    setStatus('error', 'Network lookup failed.');
+    scanning = false;
+  };
+
+  script.src =
+    APP_WEB_APP_URL +
+    '?page=lookup' +
+    '&id=' + encodeURIComponent(Number(id)) +
+    '&callback=' + encodeURIComponent(callbackName) +
+    '&t=' + Date.now();
+
+  document.body.appendChild(script);
 }
 
 // ── Player Controls ──
@@ -467,14 +738,8 @@ function showPlayer(card) {
   audioEl.addEventListener('ended', handleEnded);
   audioEl.addEventListener('error', handleAudioStreamError);
 
-  audioEl.play()
-    .then(() => {
-      document.getElementById('playBtn').textContent = '⏸';
-      document.getElementById('pDebug').textContent = "";
-    })
-    .catch(() => {
-      document.getElementById('playBtn').textContent = '▶';
-    });
+  document.getElementById('playBtn').textContent = '▶';
+  document.getElementById('pDebug').textContent = 'Tap play to hear the recording.';
 }
 
 function handleAudioStreamError() {
